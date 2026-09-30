@@ -297,6 +297,63 @@ describe("provider photo grounding", () => {
   });
 });
 
+describe("photo grounding fallback", () => {
+  test("retries once without the image when the provider rejects photo grounding", async () => {
+    const photoUrl = "https://storage.vibecodeapp.com/charlie-bed.heic";
+    const description = "Charlie found a bed where he can hide from his foster brother.";
+    const bodies: Array<Record<string, unknown>> = [];
+    let callCount = 0;
+    const service = new ContentGenerationService({
+      apiKey: "test-key",
+      fetchImpl: (async (_url, init) => {
+        callCount += 1;
+        bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (callCount === 1) return new Response("unsupported image", { status: 415 });
+        return Response.json({ output_text: JSON.stringify(generated) });
+      }) as typeof fetch,
+    });
+    const photoRequest = ContentGenerationRequestSchema.parse({
+      ...validRequest,
+      source: { type: "photo", description, mediaUrl: photoUrl },
+    });
+
+    const result = await service.generate(photoRequest);
+
+    expect(callCount).toBe(2);
+    const firstInput = bodies[0]?.input as Array<{ content: Array<Record<string, string>> }>;
+    expect(firstInput[0]?.content).toContainEqual({ type: "input_image", image_url: photoUrl });
+    expect(firstInput[0]?.content[0]?.text).toContain(description);
+    expect(typeof bodies[1]?.input).toBe("string");
+    expect(String(bodies[1]?.input)).toContain(description);
+    expect(result.result.callToAction).toBe(buildDeterministicCta(foster));
+  });
+
+  test("does not retry text-only for general provider failures", async () => {
+    let callCount = 0;
+    const service = new ContentGenerationService({
+      apiKey: "test-key",
+      fetchImpl: (async () => {
+        callCount += 1;
+        return new Response("provider down", { status: 500 });
+      }) as typeof fetch,
+    });
+    const photoRequest = ContentGenerationRequestSchema.parse({
+      ...validRequest,
+      source: {
+        type: "photo",
+        description: "Milo is carrying his toy.",
+        mediaUrl: "https://storage.vibecodeapp.com/milo.jpg",
+      },
+    });
+
+    await expect(service.generate(photoRequest)).rejects.toMatchObject({
+      code: "AI_UNAVAILABLE",
+      status: 502,
+    });
+    expect(callCount).toBe(1);
+  });
+});
+
 describe("provider failures", () => {
   test("returns a stable error for provider failures without exposing the response", async () => {
     const service = new ContentGenerationService({
