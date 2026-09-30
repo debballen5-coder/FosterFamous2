@@ -374,9 +374,12 @@ ${JSON.stringify({
   })}${rewrite}`;
 }
 
-function providerInput(request: ContentGenerationRequest): string | Array<Record<string, unknown>> {
+function providerInput(
+  request: ContentGenerationRequest,
+  includeImage = true
+): string | Array<Record<string, unknown>> {
   const prompt = buildGenerationPrompt(request);
-  if (request.source.type !== "photo" || !request.source.mediaUrl) return prompt;
+  if (!includeImage || request.source.type !== "photo" || !request.source.mediaUrl) return prompt;
 
   return [
     {
@@ -387,6 +390,14 @@ function providerInput(request: ContentGenerationRequest): string | Array<Record
       ],
     },
   ];
+}
+
+function shouldRetryWithoutImage(request: ContentGenerationRequest, status: number): boolean {
+  return Boolean(
+    request.source.type === "photo" &&
+      request.source.mediaUrl &&
+      (status === 400 || status === 415 || status === 422)
+  );
 }
 
 export const TEMPLATE_MODEL = "foster-famous-template-v1" as const;
@@ -777,27 +788,42 @@ export class ContentGenerationService {
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
-      const response = await this.fetchImpl(OPENAI_RESPONSES_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: MODEL,
-          input: providerInput(request),
-          max_output_tokens: 4_000,
-          text: {
-            format: {
-              type: "json_schema",
-              name: "foster_famous_generated_content",
-              strict: true,
-              schema: GENERATED_CONTENT_JSON_SCHEMA,
-            },
+      const requestProvider = (includeImage: boolean) =>
+        this.fetchImpl(OPENAI_RESPONSES_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.apiKey}`,
           },
-        }),
-      });
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: MODEL,
+            input: providerInput(request, includeImage),
+            max_output_tokens: 4_000,
+            text: {
+              format: {
+                type: "json_schema",
+                name: "foster_famous_generated_content",
+                strict: true,
+                schema: GENERATED_CONTENT_JSON_SCHEMA,
+              },
+            },
+          }),
+        });
+
+      let response = await requestProvider(true);
+
+      // Media is optional context, not a dependency of post creation. If the
+      // provider rejects an otherwise-valid photo URL/format, retry the same
+      // generation once as text-only using the user's written photo context.
+      // This keeps Generate Post working when storage/CDN/image compatibility
+      // changes without weakening the factual prompt or creating a retry loop.
+      if (!response.ok && shouldRetryWithoutImage(request, response.status)) {
+        console.warn("Content provider rejected photo grounding; retrying text-only", {
+          status: response.status,
+        });
+        response = await requestProvider(false);
+      }
 
       if (!response.ok) {
         console.error("Content provider request failed", { status: response.status });
