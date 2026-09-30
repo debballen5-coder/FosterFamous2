@@ -1,0 +1,128 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// A pseudonymous app installation. It intentionally contains no foster-domain data.
+model Installation {
+  id           String   @id @default(cuid())
+  createdAt    DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+  status       String   @default("ACTIVE")
+  revokedAt    DateTime?
+  tokenVersion Int      @default(1)
+  plan         String?
+  entitlement  String?
+
+  sessions           InstallationSession[]
+  aiUsage            AiUsage[]
+  idempotencyRecords IdempotencyRecord[]
+  mediaObjects       MediaObject[]
+
+  @@index([status])
+}
+
+/// Hashes only: raw credentials are returned once to the app and never persisted.
+model InstallationSession {
+  id                  String   @id @default(cuid())
+  installationId      String
+  accessTokenHash     String   @unique
+  accessExpiresAt     DateTime
+  refreshTokenHash    String   @unique
+  refreshExpiresAt    DateTime
+  tokenVersion        Int
+  createdAt           DateTime @default(now())
+  lastRefreshedAt     DateTime @default(now())
+  revokedAt           DateTime?
+
+  installation Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  @@index([installationId])
+  @@index([accessExpiresAt])
+  @@index([refreshExpiresAt])
+}
+
+/// Operational AI accounting only. Prompts and generated content are not stored here.
+model AiUsage {
+  id             String   @id @default(cuid())
+  installationId String
+  endpoint       String
+  status         String
+  units          Int      @default(1)
+  providerModel  String?
+  errorCode      String?
+  createdAt      DateTime @default(now())
+  completedAt    DateTime?
+
+  installation Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  @@index([installationId, createdAt])
+  @@index([endpoint, createdAt])
+  @@index([status, createdAt])
+}
+
+/// Completed response data is retained only for idempotency recovery, then cleaned up.
+model IdempotencyRecord {
+  id                 String   @id @default(cuid())
+  installationId     String
+  endpoint           String
+  key                String
+  requestFingerprint String
+  status             String
+  usageId            String?
+  responseJson       String?
+  errorCode          String?
+  createdAt          DateTime @default(now())
+  completedAt        DateTime?
+  expiresAt          DateTime
+
+  installation Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  @@unique([installationId, endpoint, key])
+  @@index([expiresAt])
+}
+
+/// Fixed-window counters for low-volume security controls. Keys are pseudonymous HMAC fingerprints.
+model RateLimitBucket {
+  id            String   @id @default(cuid())
+  scope         String
+  key           String
+  windowStartedAt DateTime
+  count         Int      @default(0)
+  expiresAt     DateTime
+
+  @@unique([scope, key, windowStartedAt])
+  @@index([expiresAt])
+}
+
+/// Server-side ownership and lifecycle metadata for an uploaded cloud object.
+/// Foster records, captions, notes, and other domain content stay on-device.
+model MediaObject {
+  id             String   @id @default(cuid())
+  installationId String
+  storageFileId  String?  @unique
+  storageKey     String?  @unique
+  remoteUrl      String?
+  originalName   String?
+  mediaType      String?
+  contentType    String?
+  sizeBytes      Int?
+  clientUploadId String?
+  status         String   @default("PENDING")
+  // Storage currently serves direct public CDN URLs; the route writes PUBLIC_CDN for new records.
+  visibility     String   @default("PRIVATE")
+  createdAt      DateTime @default(now())
+  availableAt    DateTime?
+  deletedAt      DateTime?
+
+  installation Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  @@unique([installationId, clientUploadId])
+  @@index([installationId])
+  @@index([installationId, status, deletedAt])
+  @@index([installationId, createdAt])
+}
