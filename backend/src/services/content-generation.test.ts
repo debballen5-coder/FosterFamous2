@@ -335,7 +335,7 @@ describe("photo grounding fallback", () => {
       fetchImpl: (async () => {
         callCount += 1;
         return new Response("provider down", { status: 500 });
-      }) as typeof fetch,
+      }) as unknown as typeof fetch,
     });
     const photoRequest = ContentGenerationRequestSchema.parse({
       ...validRequest,
